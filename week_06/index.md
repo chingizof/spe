@@ -1,3 +1,152 @@
+# Understanding Workload Properties
+
+## Why Workload Properties Matter
+
+Scale does not just mean more traffic. It changes the shape of the workload. Requests become unevenly distributed. Hot spots appear. Failure modes change.
+
+A design that works under balanced load may fail under skew. Before choosing a sharding, caching, replication, or precomputation strategy, the system’s workload needs to be understood.
+
+Key questions:
+
+- Are reads or writes dominant?
+- Is traffic evenly distributed?
+- Do a few keys receive most of the load?
+- Does one request create work for many users, objects, or services?
+- Can the expensive work be parallelized?
+- What happens when one object, user, tenant, region, or shard becomes hot?
+
+At small scale, spare capacity can hide these issues. At large scale, they become the design problem.
+
+---
+
+## Horizontal Scaling and Its Assumptions
+
+A common scaling strategy is to split work across machines. With **horizontal sharding**, data and requests are divided across multiple servers.
+
+With **consistent hashing**, a request key is hashed and mapped to a shard. The key might be a user ID, object ID, tenant ID, or record key.
+
+In theory, if a system has `N` servers, each server handles about `1/N` of the total load. Add servers, reduce per-node load.
+
+That model assumes:
+
+- Keys are evenly distributed.
+- Each key creates roughly similar work.
+- No small set of keys dominates the workload.
+- Expensive operations can be spread across machines.
+
+At scale, these assumptions often fail.
+
+---
+
+## The Problem With Averages
+
+Averages hide skew.
+
+Average request rate, CPU usage, or latency may look fine while a few users, objects, tenants, partitions, or shards are overloaded.
+
+Many systems follow a **power law distribution**:
+
+- A few users have huge follower counts.
+- A few posts receive most views.
+- A few tenants generate most API traffic.
+- A few products receive most purchases.
+- A few files, rows, or cache keys receive most reads.
+- A few regions or time windows receive most demand.
+
+A design built around the “average” entity can work for most cases and fail on the cases that dominate load.
+
+At scale, outliers stop being edge cases.
+
+---
+
+## When One Operation Creates Many Operations
+
+**Fan-out** happens when one action creates work in many places.
+
+Examples:
+
+- One message sent to a large group.
+- One post published to millions of followers.
+- One configuration change applied across many machines.
+- One cache invalidation affecting many cached objects.
+- One database update triggering indexes, notifications, analytics events, and replication.
+
+The original request may look cheap while the backend work is expensive.
+
+A social media timeline is a useful example. Many platforms optimize for reads by precomputing timelines. When a user posts, the system copies that post into follower timelines. Reads become cheap because the timeline is already prepared.
+
+This is **fan-out on write**.
+
+For a median user with fewer than 50 followers, this is cheap. The post creates a small number of writes, usually handled through a queue and worker pool.
+
+For a celebrity, the same operation can create millions of writes. The API can acknowledge the post quickly, but the backend still has to process the queue, absorb database writes, and handle downstream notifications or analytics events.
+
+The broader issue: one external request can expand into a large amount of internal work.
+
+---
+
+## Why Naive Horizontal Scaling Breaks
+
+Horizontal scaling works when work is parallelizable and evenly distributed.
+
+If each key receives similar traffic, sharding by key works well. Each shard receives a similar number of keys, and each key creates similar work.
+
+If a small number of keys dominate traffic, sharding creates hot spots.
+
+For example, if one popular object maps to one shard, a spike in reads or writes can saturate that shard while the rest of the cluster remains underused.
+
+Adding machines does not fix a workload that cannot use them.
+
+The important question is: **Can the expensive work be distributed across the added servers?**
+
+---
+
+## Designing for Skewed Workloads
+
+Skewed workloads need workload-specific paths.
+
+Common techniques:
+
+- Replicate hot objects across nodes.
+- Cache hot data closer to users.
+- Split one hot key into multiple partitions.
+- Move large tenants to dedicated infrastructure.
+- Push expensive work through queues.
+- Use backpressure to protect shared systems.
+- Serve stale data when availability matters more than freshness.
+- Separate read and write paths for different traffic classes.
+
+In the timeline example, normal accounts can use fan-out on write. Large accounts can use **fan-out on read**: store the post once, then merge it into timelines when users open the app.
+
+That gives a hybrid design:
+
+- Normal accounts use the cheaper path for ordinary traffic.
+- Hot accounts use a path that avoids massive write amplification.
+- The system identifies hot keys and handles them separately.
+
+One universal strategy is cleaner. Multiple workload-specific paths are usually more realistic.
+
+---
+
+## Design Lessons From Workload Scale
+
+Scale exposes hidden assumptions.
+
+A design may assume uniform load, independent requests, evenly distributed keys, or predictable user behavior. Those assumptions may hold in tests and fail in production.
+
+Main lessons:
+
+1. Identify hot keys, users, tenants, objects, and shards.
+2. Check whether the expensive work is actually parallelizable.
+3. Optimize hot paths.
+4. Use separate paths for different workload shapes when necessary.
+5. Degrade gracefully under overload.
+6. Measure distributions, not just averages.
+
+Graceful degradation may mean serving stale data, delaying non-critical updates, reducing recommendation quality, shedding optional work, or rate-limiting expensive requests.
+
+---
+
 # Case Study 3: Designing a Graph-based Memory/RAG System for LLM at Meta
 
 ## Setup
@@ -75,3 +224,149 @@ The full architecture splits cleanly into offline and online halves. Offline we 
 The big lesson here is that scale changes which optimizations matter. When you are serving 100 users a day, doing everything dynamically at query time is fine. When you are serving billions, you have to identify the most expensive operation in your pipeline (LLM calls), figure out which parts of it actually depend on the live user query, and push everything else offline where you can amortize the cost across batches and time. Replacing one of the LLM ranking calls with PageRank is not a clever trick, it's the obvious move once you accept that you cannot afford four LLM calls per request. Pre-computing topic-post graphs is not a clever trick either, it's just acknowledging that the post written 6 hours ago does not need its embedding regenerated when a new query comes in.
 
 Good performance engineering at scale is mostly about being honest with yourself about what work actually has to happen at request time, and ruthlessly moving everything else somewhere cheaper.
+
+---
+
+# Observability and Debugging
+
+---
+
+## Observability and Debugging at Scale
+
+Scale also changes debugging.
+
+In a small system, debugging is local. Inspect logs, reproduce the issue, add print statements, or read a stack trace. That breaks down in large distributed systems. A production request can cross many services, queues, caches, databases, and internal APIs. Each component has its own logs, metrics, deployments, and failure modes. At that point, knowing that something failed is not enough. Engineers need to know where it failed, why it failed, and what changed.
+
+**Monitoring** tells you something is wrong.
+
+**Observability** helps explain why.
+
+A dashboard showing high latency is monitoring. A trace showing that one downstream service retried a database query three times is observability.
+
+---
+
+## Why Observability Is Hard
+
+Large systems produce too much behavior to inspect manually. 
+
+**Volume**: There is too much telemetry to search directly. Logs, traces, metrics, and events become expensive to store and query.
+
+**Aggregation**: Aggregates hide detail. Average latency may look fine while p99 latency is terrible for a small user segment.
+
+**Cross-Service Failures**: A stack trace explains one process. It does not explain the full path of a request across services.
+
+**Reproduction**: Production failures often depend on real traffic, timing, data distribution, cache state, deployment order, or downstream behavior. Reproducing them locally is often unrealistic.
+
+**Cost**: Observability infrastructure has its own cost. Logs need storage. Metrics need indexing. Traces need collection and sampling. Dashboards and alerts need maintenance.
+
+#### Observability is part of system design, not an afterthought.
+
+---
+
+## Common Observability Tools
+
+Most systems use metrics, logs, and traces.
+
+### Time-Series Monitoring
+
+Time-series monitoring tracks values over time: request rate, error rate, CPU usage, memory usage, queue depth, and latency percentiles. These metrics usually feed dashboards and threshold alerts.
+
+Example: alert if error rate is above 1% for five minutes or p99 latency exceeds 500 ms.
+
+The limitation: you have to know what to measure ahead of time.
+
+### Centralized Logging
+
+Centralized logging sends service logs into one storage and search system.
+
+Logs provide context: request IDs, user IDs, errors, query names, feature flags, and internal state.
+
+The cost is storage and noise. Many logs are never read. The logs needed during an incident may be missing, sampled out, or hard to find.
+
+### Distributed Tracing
+
+Distributed tracing follows a request across services.
+
+A trace ID is attached to the request and propagated across service boundaries. Each service records a span with timing and local work. The final trace shows the request path. Tracing connects isolated service behavior into one view.
+
+---
+
+## Bad Observability Patterns
+
+Some observability creates data without understanding.
+
+### Low-Cardinality Trap
+
+Cardinality is the number of distinct values a field can have. HTTP method is low-cardinality. User ID is high-cardinality.
+
+Low-cardinality metrics are cheap, but limited:
+
+```text
+http_requests_total{method="GET", status="200", service="checkout"}
+```
+
+This can show successful GET requests to checkout. It cannot answer richer questions:
+
+- Which cohort is affected?
+- Is the issue isolated to one region?
+- Did it start after a deployment?
+- Is one user, tenant, shard, or feature flag responsible?
+
+High-cardinality data answers better questions. It is also more expensive to store and query.
+
+### Disconnected Tools
+
+Metrics in one system, logs in another, traces in another, and deployment data somewhere else forces manual correlation during incidents.
+
+The key incident question is often: **What changed?**
+
+If the observability system cannot connect symptoms to deployments, config changes, traffic shifts, or dependency failures, it leaves engineers guessing.
+
+---
+
+## Better Observability
+
+Good observability is high-cardinality, high-dimensional, and explorable.
+
+- **High-cardinality:** supports fields like user ID, tenant ID, request ID, shard ID, host ID, region, build version, and feature flag.
+- **High-dimensional:** supports questions across many fields at once.
+- **Explorable:** supports new questions during an incident, not just predefined dashboards.
+
+### Structured Events
+
+Services should emit structured events with rich context instead of disconnected metrics, logs, and traces.
+
+Example fields:
+
+```text
+trace_id
+service
+endpoint
+user_id
+region
+status_code
+latency_ms
+build_version
+feature_flags
+shard_id
+error_type
+```
+
+Structured events make it easier to slice system behavior after the fact.
+
+### Distributed Tracing as a First-Class Primitive
+
+Tracing should be part of the request path, especially in microservice-heavy systems.
+
+Every request should carry correlation context across service boundaries. Without that context, engineers manually connect logs from different systems.
+
+### Dynamic Sampling
+
+Storing everything is too expensive. Random sampling can discard the data needed most.
+
+Dynamic sampling keeps useful data while controlling cost:
+
+- Keep all errors.
+- Keep all slow requests.
+- Sample normal requests based on volume.
+- Use tail-based sampling when possible.
