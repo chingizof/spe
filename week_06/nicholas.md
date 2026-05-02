@@ -6,7 +6,7 @@ Imagine you're a software engineer working at Instagram, and you and a few cowor
 are working on a new feature called **Feature "Z"**.
 
 Everything was passing the unit tests and the metrics looked good, but in production
-the code crashed in 36 hours with a test failing...
+the code crashed in 36 hours with a test failing!
 
 You and your coworker go and investigate.
 
